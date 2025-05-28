@@ -242,7 +242,9 @@ class ParameterOptimizer:
                 agent.batch_size = params['batch_size']
             if 'memory_size' in params:
                 agent.memory_size = params['memory_size']
-                agent.memory = agent.ReplayBuffer(params['memory_size'])
+                # 修复ReplayBuffer引用错误
+                from agent_dir.agent_dqn import ReplayBuffer
+                agent.memory = ReplayBuffer(params['memory_size'])
             if 'update_target_freq' in params:
                 agent.update_target_freq = params['update_target_freq']
             
@@ -283,6 +285,8 @@ class ParameterOptimizer:
             
         except Exception as e:
             print(f"❌ 配置测试失败: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'config_name': config_name,
                 'params': params,
@@ -319,7 +323,8 @@ class ParameterOptimizer:
                 episode_reward += reward
                 agent.frame_count += 1
                 
-                if agent.frame_count % 2 == 0 and len(agent.memory) >= agent.batch_size:
+                # 使用agent的train_freq属性
+                if agent.frame_count % agent.train_freq == 0 and len(agent.memory) >= agent.batch_size:
                     agent.train()
                 
                 if agent.frame_count % agent.update_target_freq == 0:
@@ -388,10 +393,13 @@ class ParameterOptimizer:
         report.append("="*50)
         report.append(f"总测试配置数: {len(self.results)}")
         
-        # 统计成功率
+        # 统计成功率 - 修复除零错误
         successful_configs = [r for r in self.results if r.get('converged', False)]
-        success_rate = len(successful_configs) / len(self.results) * 100
-        report.append(f"收敛成功率: {success_rate:.1f}%")
+        if len(self.results) > 0:
+            success_rate = len(successful_configs) / len(self.results) * 100
+            report.append(f"收敛成功率: {success_rate:.1f}%")
+        else:
+            report.append("收敛成功率: 0.0% (没有测试结果)")
         
         if successful_configs:
             # 最佳配置
@@ -408,14 +416,18 @@ class ParameterOptimizer:
             for i, config in enumerate(successful_configs, 1):
                 report.append(f"{i}. {config['config_name']}: {config['frames_used']} 帧 "
                             f"({config['training_time']:.1f}秒)")
+        else:
+            report.append(f"\n❌ 没有成功收敛的配置")
         
         # 失败配置
         failed_configs = [r for r in self.results if not r.get('converged', False)]
         if failed_configs:
-            report.append(f"\n失败配置:")
-            for config in failed_configs:
+            report.append(f"\n失败配置 ({len(failed_configs)}个):")
+            for config in failed_configs[:10]:  # 只显示前10个失败配置
                 reason = config.get('error', '未收敛')
                 report.append(f"- {config['config_name']}: {reason}")
+            if len(failed_configs) > 10:
+                report.append(f"... 还有 {len(failed_configs) - 10} 个失败配置")
         
         # 保存报告
         with open('optimization_results/optimization_report.txt', 'w', encoding='utf-8') as f:
