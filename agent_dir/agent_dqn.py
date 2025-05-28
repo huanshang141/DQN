@@ -12,28 +12,18 @@ import matplotlib.pyplot as plt
 
 
 class QNetwork(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=3):
+    def __init__(self, input_size, hidden_size, output_size):
         super(QNetwork, self).__init__()
-        self.num_layers = num_layers
-        
-        # 构建多层网络
-        layers = []
-        current_size = input_size
-        
-        for i in range(num_layers):
-            layers.append(nn.Linear(current_size, hidden_size))
-            layers.append(nn.ReLU())
-            layers.append(nn.BatchNorm1d(hidden_size))  # 添加批归一化
-            layers.append(nn.Dropout(0.1))  # 添加dropout
-            current_size = hidden_size
-        
-        # 输出层
-        layers.append(nn.Linear(hidden_size, output_size))
-        
-        self.network = nn.Sequential(*layers)
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        self.relu = nn.ReLU()
 
     def forward(self, inputs):
-        return self.network(inputs)
+        x = self.relu(self.fc1(inputs))
+        x = self.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
 
 
 class ReplayBuffer:
@@ -66,19 +56,17 @@ class AgentDQN(Agent):
         self.state_size = env.observation_space.shape[0]
         self.action_size = env.action_space.n
         
-        # 超参数 - GPU优化版本
+        # 超参数 - 调整为更稳定的设置
         self.lr = args.lr
         self.gamma = args.gamma
         self.epsilon = 1.0
-        self.epsilon_min = 0.05
-        self.epsilon_decay = getattr(args, 'epsilon_decay', 0.9995)
-        self.batch_size = getattr(args, 'batch_size', 512)  # 增加默认批次大小
-        self.memory_size = getattr(args, 'memory_size', 100000)  # 增加内存大小
-        self.update_target_freq = getattr(args, 'update_target_freq', 500)
+        self.epsilon_min = 0.05  # 提高最小epsilon，保持一定探索
+        self.epsilon_decay = getattr(args, 'epsilon_decay', 0.9995)  # 支持动态配置
+        self.batch_size = getattr(args, 'batch_size', 64)  # 支持动态配置
+        self.memory_size = getattr(args, 'memory_size', 50000)  # 支持动态配置
+        self.update_target_freq = getattr(args, 'update_target_freq', 500)  # 支持动态配置
         self.hidden_size = args.hidden_size
         self.n_frames = args.n_frames
-        self.train_freq = getattr(args, 'train_freq', 1)  # 训练频率
-        self.num_layers = getattr(args, 'num_layers', 3)  # 网络层数
         
         # 学习率衰减参数 - 从命令行参数获取
         self.lr_decay = args.lr_decay
@@ -99,19 +87,12 @@ class AgentDQN(Agent):
         
         # 设备
         self.device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
-        print(f"使用设备: {self.device}")
         
-        # GPU优化设置
-        if self.device.type == 'cuda':
-            torch.backends.cudnn.benchmark = True  # 优化cuDNN性能
-            torch.backends.cudnn.deterministic = False  # 允许非确定性算法以提高性能
-        
-        # 网络 - 支持多层
-        self.q_network = QNetwork(self.state_size, self.hidden_size, self.action_size, self.num_layers).to(self.device)
-        self.target_network = QNetwork(self.state_size, self.hidden_size, self.action_size, self.num_layers).to(self.device)
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.lr, weight_decay=1e-5)
-        
-        # 使用更aggressive的学习率调度
+        # 网络
+        self.q_network = QNetwork(self.state_size, self.hidden_size, self.action_size).to(self.device)
+        self.target_network = QNetwork(self.state_size, self.hidden_size, self.action_size).to(self.device)
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.lr)
+        # 使用简单的指数衰减调度器
         self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=self.lr_decay)
         
         # 经验回放
@@ -126,13 +107,6 @@ class AgentDQN(Agent):
         
         # TensorBoard
         self.writer = SummaryWriter('logs/dqn')
-        
-        # 批处理优化
-        self.state_buffer = []
-        self.action_buffer = []
-        self.reward_buffer = []
-        self.next_state_buffer = []
-        self.done_buffer = []
         
         # 绘图相关
         self.episode_rewards = []
@@ -152,63 +126,33 @@ class AgentDQN(Agent):
         """
         self.epsilon = 0.01  # 测试时使用较小的epsilon
 
-    def rebuild_network(self, hidden_size=None, num_layers=None):
-        """重新构建网络以支持不同的架构"""
-        if hidden_size:
-            self.hidden_size = hidden_size
-        if num_layers:
-            self.num_layers = num_layers
-        
-        # 重新创建网络
-        self.q_network = QNetwork(self.state_size, self.hidden_size, self.action_size, self.num_layers).to(self.device)
-        self.target_network = QNetwork(self.state_size, self.hidden_size, self.action_size, self.num_layers).to(self.device)
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.lr, weight_decay=1e-5)
-        self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=self.lr_decay)
-        
-        # 更新目标网络
-        self.target_network.load_state_dict(self.q_network.state_dict())
-
     def train(self):
         """
-        Implement your training algorithm here - GPU优化版本
+        Implement your training algorithm here
         """
         if len(self.memory) < self.batch_size:
             return
         
-        # 使用更大的批次进行训练以提高GPU利用率
-        effective_batch_size = min(self.batch_size, len(self.memory))
-        
         # 从经验回放中采样
-        batch = self.memory.sample(effective_batch_size)
+        batch = self.memory.sample(self.batch_size)
+        # 修复tensor创建警告
+        states = torch.FloatTensor(np.array([e[0] for e in batch])).to(self.device)
+        actions = torch.LongTensor([e[1] for e in batch]).to(self.device)
+        rewards = torch.FloatTensor([e[2] for e in batch]).to(self.device)
+        next_states = torch.FloatTensor(np.array([e[3] for e in batch])).to(self.device)
+        dones = torch.BoolTensor([e[4] for e in batch]).to(self.device)
         
-        # 预分配tensor以提高内存效率
-        states = torch.empty((effective_batch_size, self.state_size), dtype=torch.float32, device=self.device)
-        actions = torch.empty(effective_batch_size, dtype=torch.long, device=self.device)
-        rewards = torch.empty(effective_batch_size, dtype=torch.float32, device=self.device)
-        next_states = torch.empty((effective_batch_size, self.state_size), dtype=torch.float32, device=self.device)
-        dones = torch.empty(effective_batch_size, dtype=torch.bool, device=self.device)
+        # 计算当前Q值
+        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
         
-        # 填充数据
-        for i, (state, action, reward, next_state, done) in enumerate(batch):
-            states[i] = torch.from_numpy(np.array(state))
-            actions[i] = action
-            rewards[i] = reward
-            next_states[i] = torch.from_numpy(np.array(next_state))
-            dones[i] = done
+        # Double DQN: 使用主网络选择动作，目标网络评估Q值
+        with torch.no_grad():
+            next_actions = self.q_network(next_states).max(1)[1].unsqueeze(1)
+            next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+            target_q_values = rewards + (self.gamma * next_q_values * ~dones)
         
-        # 使用混合精度训练（如果支持）
-        with torch.cuda.amp.autocast(enabled=self.device.type=='cuda'):
-            # 计算当前Q值
-            current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
-            
-            # Double DQN: 使用主网络选择动作，目标网络评估Q值
-            with torch.no_grad():
-                next_actions = self.q_network(next_states).max(1)[1].unsqueeze(1)
-                next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
-                target_q_values = rewards + (self.gamma * next_q_values * ~dones)
-            
-            # 计算损失
-            loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
+        # 计算损失
+        loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
         
         # 优化
         self.optimizer.zero_grad()
@@ -219,11 +163,11 @@ class AgentDQN(Agent):
         
         self.optimizer.step()
         
-        # 更新epsilon
+        # 更新epsilon - 更慢的衰减
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
         
-        # 学习率衰减
+        # 每100步进行一次学习率衰减
         if self.frame_count % 1000 == 0:
             current_lr = self.optimizer.param_groups[0]['lr']
             if current_lr > self.lr_min:
@@ -280,14 +224,14 @@ class AgentDQN(Agent):
 
     def run(self):
         """
-        Implement the interaction between agent and environment here - GPU优化版本
+        Implement the interaction between agent and environment here
         """
         reward_history = deque(maxlen=100)
-        all_rewards = []
+        all_rewards = []  # 存储所有回合的奖励用于收敛判断
         
-        print(f"开始DQN训练... (GPU优化版本)")
-        print(f"批次大小: {self.batch_size}, 网络层数: {self.num_layers}, 隐藏层大小: {self.hidden_size}")
+        print(f"开始DQN训练...")
         print(f"收敛条件：最近{self.convergence_window}回合平均奖励≥{self.convergence_threshold}")
+        print(f"稳定性改进：Double DQN + 梯度裁剪 + 更大batch_size + 更慢epsilon衰减")
         print("-" * 70)
         
         while self.frame_count < self.n_frames:
@@ -307,8 +251,8 @@ class AgentDQN(Agent):
                 episode_reward += reward
                 self.frame_count += 1
                 
-                # 更频繁的训练以提高GPU利用率
-                if self.frame_count % self.train_freq == 0 and len(self.memory) >= self.batch_size:
+                # 训练 - 更频繁的训练
+                if self.frame_count % 2 == 0 and len(self.memory) >= self.batch_size:
                     self.train()
                 
                 # 更新目标网络
