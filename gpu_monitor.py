@@ -1,10 +1,16 @@
 import time
 import psutil
-import GPUtil
 import threading
 from collections import deque
 import matplotlib.pyplot as plt
 import numpy as np
+
+try:
+    import GPUtil
+    HAS_GPUTIL = True
+except ImportError:
+    HAS_GPUTIL = False
+    print("警告: GPUtil未安装，GPU监控功能受限")
 
 class GPUMonitor:
     def __init__(self, monitor_interval=1.0):
@@ -15,6 +21,7 @@ class GPUMonitor:
         self.cpu_usage = deque(maxlen=1000)
         self.timestamps = deque(maxlen=1000)
         self.start_time = None
+        self.has_gpu = HAS_GPUTIL
         
     def start_monitoring(self):
         """开始监控"""
@@ -23,25 +30,35 @@ class GPUMonitor:
         self.monitor_thread = threading.Thread(target=self._monitor_loop)
         self.monitor_thread.daemon = True
         self.monitor_thread.start()
-        print("GPU监控已启动...")
+        if self.has_gpu:
+            print("GPU监控已启动...")
+        else:
+            print("CPU监控已启动...")
     
     def stop_monitoring(self):
         """停止监控"""
         self.monitoring = False
         if hasattr(self, 'monitor_thread'):
             self.monitor_thread.join()
-        print("GPU监控已停止")
+        if self.has_gpu:
+            print("GPU监控已停止")
+        else:
+            print("CPU监控已停止")
     
     def _monitor_loop(self):
         """监控循环"""
         while self.monitoring:
             try:
                 # 获取GPU信息
-                gpus = GPUtil.getGPUs()
-                if gpus:
-                    gpu = gpus[0]  # 使用第一个GPU
-                    self.gpu_usage.append(gpu.load * 100)
-                    self.gpu_memory.append(gpu.memoryUsed / gpu.memoryTotal * 100)
+                if self.has_gpu:
+                    gpus = GPUtil.getGPUs()
+                    if gpus:
+                        gpu = gpus[0]  # 使用第一个GPU
+                        self.gpu_usage.append(gpu.load * 100)
+                        self.gpu_memory.append(gpu.memoryUsed / gpu.memoryTotal * 100)
+                    else:
+                        self.gpu_usage.append(0)
+                        self.gpu_memory.append(0)
                 else:
                     self.gpu_usage.append(0)
                     self.gpu_memory.append(0)
