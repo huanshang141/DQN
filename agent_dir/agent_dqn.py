@@ -65,7 +65,6 @@ class AgentDQN(Agent):
         self.batch_size = getattr(args, 'batch_size', 64)  # 支持动态配置
         self.memory_size = getattr(args, 'memory_size', 50000)  # 支持动态配置
         self.update_target_freq = getattr(args, 'update_target_freq', 500)  # 支持动态配置
-        self.train_freq = getattr(args, 'train_freq', 2)  # 训练频率
         self.hidden_size = args.hidden_size
         self.n_frames = args.n_frames
         
@@ -134,19 +133,14 @@ class AgentDQN(Agent):
         if len(self.memory) < self.batch_size:
             return
         
-        # GPU内存预分配以提高性能
-        if torch.cuda.is_available() and self.batch_size >= 1024:
-            torch.cuda.empty_cache()
-        
         # 从经验回放中采样
         batch = self.memory.sample(self.batch_size)
-        
-        # 批量创建tensor以提高GPU利用率
-        states = torch.FloatTensor(np.array([e[0] for e in batch])).to(self.device, non_blocking=True)
-        actions = torch.LongTensor([e[1] for e in batch]).to(self.device, non_blocking=True)
-        rewards = torch.FloatTensor([e[2] for e in batch]).to(self.device, non_blocking=True)
-        next_states = torch.FloatTensor(np.array([e[3] for e in batch])).to(self.device, non_blocking=True)
-        dones = torch.BoolTensor([e[4] for e in batch]).to(self.device, non_blocking=True)
+        # 修复tensor创建警告
+        states = torch.FloatTensor(np.array([e[0] for e in batch])).to(self.device)
+        actions = torch.LongTensor([e[1] for e in batch]).to(self.device)
+        rewards = torch.FloatTensor([e[2] for e in batch]).to(self.device)
+        next_states = torch.FloatTensor(np.array([e[3] for e in batch])).to(self.device)
+        dones = torch.BoolTensor([e[4] for e in batch]).to(self.device)
         
         # 计算当前Q值
         current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
@@ -173,15 +167,11 @@ class AgentDQN(Agent):
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
         
-        # 每1000步进行一次学习率衰减
+        # 每100步进行一次学习率衰减
         if self.frame_count % 1000 == 0:
             current_lr = self.optimizer.param_groups[0]['lr']
             if current_lr > self.lr_min:
                 self.scheduler.step()
-        
-        # 定期清理GPU缓存
-        if self.frame_count % 10000 == 0 and torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     def check_convergence(self, reward_history):
         """
@@ -261,8 +251,8 @@ class AgentDQN(Agent):
                 episode_reward += reward
                 self.frame_count += 1
                 
-                # 训练 - 使用可配置的训练频率
-                if self.frame_count % self.train_freq == 0 and len(self.memory) >= self.batch_size:
+                # 训练 - 更频繁的训练
+                if self.frame_count % 2 == 0 and len(self.memory) >= self.batch_size:
                     self.train()
                 
                 # 更新目标网络
