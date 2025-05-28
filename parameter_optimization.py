@@ -552,7 +552,7 @@ def main():
     """主函数"""
     import argparse
     parser = argparse.ArgumentParser(description='参数优化工具')
-    parser.add_argument('--method', choices=['all', 'grid', 'random', 'adaptive'], 
+    parser.add_argument('--method', choices=['all', 'grid', 'random', 'adaptive', 'a100'], 
                        default='all', help='优化方法')
     parser.add_argument('--trials', type=int, default=30, help='随机搜索试验次数')
     args = parser.parse_args()
@@ -564,6 +564,12 @@ def main():
             optimizer.random_search(n_trials=args.trials)
         elif args.method == 'adaptive':
             optimizer.adaptive_search(n_trials=args.trials)
+        elif args.method == 'a100':
+            # A100专用优化
+            optimizer.test_a100_configs()
+            optimizer.grid_search_a100()
+            if args.trials > 0:
+                optimizer.random_search(n_trials=args.trials)
         else:
             optimizer.optimize(method=args.method)
         
