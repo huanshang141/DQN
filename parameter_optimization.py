@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import os
 import itertools
 import random as python_random
+from gpu_monitor import GPUMonitor
 
 
 class ParameterOptimizer:
@@ -16,16 +17,18 @@ class ParameterOptimizer:
         self.best_config = None
         self.best_frames = float('inf')
         
-        # 定义参数搜索空间
+        # 定义参数搜索空间 - 针对GPU优化
         self.param_ranges = {
             'lr': [0.0005, 0.001, 0.002, 0.003, 0.005, 0.008, 0.01],
             'lr_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
             'epsilon_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
-            'batch_size': [32, 48, 64, 96, 128, 192, 256],
-            'memory_size': [10000, 20000, 30000, 40000, 50000, 75000, 100000],
+            'batch_size': [128, 256, 512, 1024, 2048],  # 大幅增加批次大小
+            'memory_size': [50000, 100000, 200000, 300000, 500000],  # 增加内存大小
             'update_target_freq': [100, 200, 300, 500, 750, 1000],
-            'hidden_size': [64, 96, 128, 192, 256, 384, 512],
-            'grad_norm_clip': [0.5, 1.0, 2.0, 5.0, 10.0]
+            'hidden_size': [256, 512, 1024, 2048],  # 增加网络大小
+            'grad_norm_clip': [0.5, 1.0, 2.0, 5.0, 10.0],
+            'train_freq': [1, 2, 4],  # 新增训练频率参数
+            'num_layers': [2, 3, 4, 5]  # 新增网络层数参数
         }
         
         # 随机搜索的参数范围（连续值）
@@ -36,20 +39,24 @@ class ParameterOptimizer:
             'grad_norm_clip': (0.1, 10.0)
         }
         
-        # 离散值范围
+        # 离散值范围 - GPU优化版本
         self.discrete_ranges = {
-            'batch_size': [16, 32, 48, 64, 96, 128, 192, 256, 384],
-            'memory_size': list(range(5000, 100001, 5000)),
+            'batch_size': [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096],
+            'memory_size': list(range(50000, 500001, 50000)),
             'update_target_freq': list(range(50, 1001, 50)),
-            'hidden_size': [32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 512]
+            'hidden_size': [128, 256, 384, 512, 768, 1024, 1536, 2048],
+            'train_freq': [1, 2, 4, 8],
+            'num_layers': [2, 3, 4, 5, 6]
         }
+        
+        self.gpu_monitor = GPUMonitor()
         
     def create_args(self, **kwargs):
         """创建参数配置"""
         default_args = {
             'env_name': 'CartPole-v0',
             'seed': 11037,
-            'hidden_size': 128,
+            'hidden_size': 512,  # 增加默认网络大小
             'lr': 0.001,
             'gamma': 0.99,
             'grad_norm_clip': 1.0,
@@ -63,6 +70,10 @@ class ParameterOptimizer:
             'test': False,
             'use_cuda': True,
             'n_frames': 60000,
+            'train_freq': 1,  # 新增默认训练频率
+            'num_layers': 3,  # 新增默认层数
+            'prefetch_factor': 4,  # 数据预取因子
+            'num_workers': 2,  # 数据加载工作进程数
         }
         
         # 更新参数
@@ -189,6 +200,9 @@ class ParameterOptimizer:
         print(f"测试配置: {config_name}")
         print(f"参数: {params}")
         
+        # 启动GPU监控
+        self.gpu_monitor.start_monitoring()
+        
         try:
             # 创建环境和代理
             env = gym.make('CartPole-v0')
@@ -196,14 +210,16 @@ class ParameterOptimizer:
             
             # 修改agent中的超参数
             if hasattr(args, 'epsilon_decay'):
-                # 这里需要传递epsilon_decay给agent
                 args.epsilon_decay = params.get('epsilon_decay', 0.9995)
             
             agent = AgentDQN(env, args)
             
-            # 如果参数中有epsilon_decay，需要设置到agent中
-            if 'epsilon_decay' in params:
-                agent.epsilon_decay = params['epsilon_decay']
+            # 设置所有参数到agent中
+            for param_name, param_value in params.items():
+                if hasattr(agent, param_name):
+                    setattr(agent, param_name, param_value)
+            
+            # 特殊处理需要重新初始化的参数
             if 'batch_size' in params:
                 agent.batch_size = params['batch_size']
             if 'memory_size' in params:
@@ -211,6 +227,14 @@ class ParameterOptimizer:
                 agent.memory = agent.ReplayBuffer(params['memory_size'])
             if 'update_target_freq' in params:
                 agent.update_target_freq = params['update_target_freq']
+            if 'train_freq' in params:
+                agent.train_freq = params['train_freq']
+            if 'num_layers' in params or 'hidden_size' in params:
+                # 重新构建网络以支持更多层
+                agent.rebuild_network(
+                    hidden_size=params.get('hidden_size', agent.hidden_size),
+                    num_layers=params.get('num_layers', 3)
+                )
             
             # 记录开始时间
             start_time = time.time()
@@ -218,9 +242,9 @@ class ParameterOptimizer:
             # 运行训练
             converged, frames_used = self.run_training(agent)
             
-            # 记录结束时间
-            end_time = time.time()
-            training_time = end_time - start_time
+            # 停止监控并获取统计
+            self.gpu_monitor.stop_monitoring()
+            gpu_stats = self.gpu_monitor.get_current_stats()
             
             # 保存结果
             result = {
@@ -229,8 +253,14 @@ class ParameterOptimizer:
                 'converged': converged,
                 'frames_used': frames_used,
                 'training_time': training_time,
-                'success': converged and frames_used < self.best_frames
+                'success': converged and frames_used < self.best_frames,
+                'gpu_stats': gpu_stats  # 添加GPU统计信息
             }
+            
+            # 打印GPU利用率信息
+            if gpu_stats:
+                print(f"GPU利用率: 平均{gpu_stats['avg_gpu_usage']:.1f}%, 最大{gpu_stats['max_gpu_usage']:.1f}%")
+                print(f"GPU显存: 平均{gpu_stats['avg_gpu_memory']:.1f}%, 最大{gpu_stats['max_gpu_memory']:.1f}%")
             
             self.results.append(result)
             
@@ -248,6 +278,7 @@ class ParameterOptimizer:
             return result
             
         except Exception as e:
+            self.gpu_monitor.stop_monitoring()
             print(f"❌ 配置测试失败: {e}")
             return {
                 'config_name': config_name,
