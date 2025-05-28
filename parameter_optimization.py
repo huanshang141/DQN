@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import os
 import itertools
 import random as python_random
+import torch
 
 
 class ParameterOptimizer:
@@ -21,11 +22,12 @@ class ParameterOptimizer:
             'lr': [0.0005, 0.001, 0.002, 0.003, 0.005, 0.008, 0.01],
             'lr_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
             'epsilon_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
-            'batch_size': [32, 48, 64, 96, 128, 192, 256],
-            'memory_size': [10000, 20000, 30000, 40000, 50000, 75000, 100000],
-            'update_target_freq': [100, 200, 300, 500, 750, 1000],
-            'hidden_size': [64, 96, 128, 192, 256, 384, 512],
-            'grad_norm_clip': [0.5, 1.0, 2.0, 5.0, 10.0]
+            'batch_size': [128, 256, 512, 1024, 2048, 4096],  # 大幅增加批次大小
+            'memory_size': [20000, 50000, 100000, 200000, 500000],  # 增大经验池
+            'update_target_freq': [50, 100, 200, 300, 500],  # 更频繁更新
+            'hidden_size': [256, 512, 1024, 2048, 4096],  # 大幅增加网络规模
+            'grad_norm_clip': [0.5, 1.0, 2.0, 5.0, 10.0],
+            'train_freq': [1, 2, 4, 8]  # 训练频率
         }
         
         # 随机搜索的参数范围（连续值）
@@ -36,13 +38,45 @@ class ParameterOptimizer:
             'grad_norm_clip': (0.1, 10.0)
         }
         
-        # 离散值范围
+        # 离散值范围 - 针对A100优化
         self.discrete_ranges = {
-            'batch_size': [16, 32, 48, 64, 96, 128, 192, 256, 384],
-            'memory_size': list(range(5000, 100001, 5000)),
-            'update_target_freq': list(range(50, 1001, 50)),
-            'hidden_size': [32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 512]
+            'batch_size': [256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192],
+            'memory_size': list(range(50000, 500001, 50000)),
+            'update_target_freq': list(range(25, 501, 25)),
+            'hidden_size': [256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096],
+            'train_freq': [1, 2, 4, 8, 16]
         }
+        
+        # A100专用高性能配置
+        self.a100_configs = [
+            {
+                'name': 'A100_High_Throughput',
+                'batch_size': 4096,
+                'hidden_size': 2048,
+                'memory_size': 200000,
+                'train_freq': 1,
+                'lr': 0.003,
+                'update_target_freq': 100
+            },
+            {
+                'name': 'A100_Mega_Batch',
+                'batch_size': 8192,
+                'hidden_size': 1024,
+                'memory_size': 500000,
+                'train_freq': 1,
+                'lr': 0.005,
+                'update_target_freq': 50
+            },
+            {
+                'name': 'A100_Deep_Network',
+                'batch_size': 2048,
+                'hidden_size': 4096,
+                'memory_size': 300000,
+                'train_freq': 2,
+                'lr': 0.002,
+                'update_target_freq': 75
+            }
+        ]
         
     def create_args(self, **kwargs):
         """创建参数配置"""
@@ -311,6 +345,16 @@ class ParameterOptimizer:
     def optimize(self, method='all'):
         """执行参数优化"""
         print("开始系统化参数优化...")
+        print(f"检测到GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+        
+        # 检测是否为A100等高性能GPU
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            if 'A100' in gpu_name or 'V100' in gpu_name or 'RTX' in gpu_name:
+                print("检测到高性能GPU，启用A100优化配置...")
+                if method == 'all' or method == 'a100':
+                    self.test_a100_configs()
+                    self.grid_search_a100()
         
         if method == 'all' or method == 'grid':
             self.grid_search_small()
@@ -464,6 +508,44 @@ class ParameterOptimizer:
             json.dump(param_analysis, f, indent=2, ensure_ascii=False)
         
         return param_analysis
+    
+    def test_a100_configs(self):
+        """测试A100专用配置"""
+        print("测试A100高性能配置...")
+        
+        for config in self.a100_configs:
+            config_name = config.pop('name')
+            print(f"\n测试 {config_name}")
+            self.test_configuration(config_name, **config)
+    
+    def grid_search_a100(self):
+        """A100优化的网格搜索"""
+        print("执行A100优化网格搜索...")
+        
+        # A100优化的参数范围
+        a100_ranges = {
+            'lr': [0.002, 0.005, 0.008],
+            'batch_size': [1024, 2048, 4096],
+            'hidden_size': [1024, 2048, 4096],
+            'train_freq': [1, 2, 4],
+            'update_target_freq': [50, 100, 200]
+        }
+        
+        # 生成所有组合
+        param_names = list(a100_ranges.keys())
+        param_values = list(a100_ranges.values())
+        
+        total_combinations = np.prod([len(values) for values in param_values])
+        print(f"总共 {total_combinations} 个A100优化组合")
+        
+        for i, combination in enumerate(itertools.product(*param_values)):
+            params = dict(zip(param_names, combination))
+            # 设置大内存池以配合大批次
+            params['memory_size'] = max(100000, params['batch_size'] * 50)
+            config_name = f"A100_Grid_{i+1:03d}"
+            
+            print(f"\n进度: {i+1}/{total_combinations}")
+            self.test_configuration(config_name, **params)
 
 
 def main():
