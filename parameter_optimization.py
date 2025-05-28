@@ -17,18 +17,18 @@ class ParameterOptimizer:
         self.best_config = None
         self.best_frames = float('inf')
         
-        # 定义参数搜索空间 - 针对GPU优化，避免小批次问题
+        # 定义参数搜索空间 - 针对GPU优化
         self.param_ranges = {
             'lr': [0.0005, 0.001, 0.002, 0.003, 0.005, 0.008, 0.01],
             'lr_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
             'epsilon_decay': [0.995, 0.997, 0.999, 0.9995, 0.9997, 0.9999],
-            'batch_size': [64, 128, 256, 512, 1024],  # 确保最小批次为64
-            'memory_size': [50000, 100000, 200000, 300000, 500000],
+            'batch_size': [128, 256, 512, 1024, 2048],  # 大幅增加批次大小
+            'memory_size': [50000, 100000, 200000, 300000, 500000],  # 增加内存大小
             'update_target_freq': [100, 200, 300, 500, 750, 1000],
-            'hidden_size': [256, 512, 1024, 2048],
+            'hidden_size': [256, 512, 1024, 2048],  # 增加网络大小
             'grad_norm_clip': [0.5, 1.0, 2.0, 5.0, 10.0],
-            'train_freq': [1, 2, 4],
-            'num_layers': [2, 3, 4, 5]
+            'train_freq': [1, 2, 4],  # 新增训练频率参数
+            'num_layers': [2, 3, 4, 5]  # 新增网络层数参数
         }
         
         # 随机搜索的参数范围（连续值）
@@ -39,9 +39,9 @@ class ParameterOptimizer:
             'grad_norm_clip': (0.1, 10.0)
         }
         
-        # 离散值范围 - GPU优化版本，确保批次大小足够
+        # 离散值范围 - GPU优化版本
         self.discrete_ranges = {
-            'batch_size': [64, 128, 256, 512, 1024, 1536, 2048],  # 移除小批次
+            'batch_size': [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096],
             'memory_size': list(range(50000, 500001, 50000)),
             'update_target_freq': list(range(50, 1001, 50)),
             'hidden_size': [128, 256, 384, 512, 768, 1024, 1536, 2048],
@@ -49,15 +49,14 @@ class ParameterOptimizer:
             'num_layers': [2, 3, 4, 5, 6]
         }
         
-        # GPU监控器
-        self.gpu_monitor = None
-
+        self.gpu_monitor = GPUMonitor()
+        
     def create_args(self, **kwargs):
         """创建参数配置"""
         default_args = {
-            'env_name': 'CartPole-v1',  # 使用v1版本
+            'env_name': 'CartPole-v0',
             'seed': 11037,
-            'hidden_size': 256,  # 增加默认网络大小
+            'hidden_size': 512,  # 增加默认网络大小
             'lr': 0.001,
             'gamma': 0.99,
             'grad_norm_clip': 1.0,
@@ -71,20 +70,16 @@ class ParameterOptimizer:
             'test': False,
             'use_cuda': True,
             'n_frames': 60000,
-            'train_freq': 1,
-            'num_layers': 3,
-            'batch_size': 64,  # 确保默认批次足够大
+            'train_freq': 1,  # 新增默认训练频率
+            'num_layers': 3,  # 新增默认层数
+            'prefetch_factor': 4,  # 数据预取因子
+            'num_workers': 2,  # 数据加载工作进程数
         }
         
         # 更新参数
         default_args.update(kwargs)
-        
-        # 确保批次大小至少为64
-        if 'batch_size' in default_args:
-            default_args['batch_size'] = max(default_args['batch_size'], 64)
-        
         return Namespace(**default_args)
-
+    
     def generate_random_params(self):
         """生成随机参数组合"""
         params = {}
@@ -111,14 +106,14 @@ class ParameterOptimizer:
         return params
     
     def grid_search_small(self):
-        """小规模网格搜索 - 修复批次大小问题"""
+        """小规模网格搜索"""
         print("执行小规模网格搜索...")
         
-        # 选择较少的参数值进行网格搜索，确保批次大小足够
+        # 选择较少的参数值进行网格搜索
         small_ranges = {
             'lr': [0.001, 0.003, 0.005],
-            'batch_size': [64, 128, 256],  # 移除32
-            'hidden_size': [128, 256, 512],  # 调整范围
+            'batch_size': [32, 64, 128],
+            'hidden_size': [128, 192, 256],
             'update_target_freq': [200, 400, 600]
         }
         
@@ -206,13 +201,16 @@ class ParameterOptimizer:
         print(f"参数: {params}")
         
         # 启动GPU监控
-        self.gpu_monitor = GPUMonitor()
         self.gpu_monitor.start_monitoring()
         
         try:
             # 创建环境和代理
-            env = gym.make('CartPole-v1')  # 使用v1版本
+            env = gym.make('CartPole-v0')
             args = self.create_args(**params)
+            
+            # 修改agent中的超参数
+            if hasattr(args, 'epsilon_decay'):
+                args.epsilon_decay = params.get('epsilon_decay', 0.9995)
             
             agent = AgentDQN(env, args)
             
@@ -223,7 +221,7 @@ class ParameterOptimizer:
             
             # 特殊处理需要重新初始化的参数
             if 'batch_size' in params:
-                agent.batch_size = max(params['batch_size'], 64)  # 确保最小64
+                agent.batch_size = params['batch_size']
             if 'memory_size' in params:
                 agent.memory_size = params['memory_size']
                 agent.memory = agent.ReplayBuffer(params['memory_size'])
@@ -244,10 +242,6 @@ class ParameterOptimizer:
             # 运行训练
             converged, frames_used = self.run_training(agent)
             
-            # 记录结束时间
-            end_time = time.time()
-            training_time = end_time - start_time
-            
             # 停止监控并获取统计
             self.gpu_monitor.stop_monitoring()
             gpu_stats = self.gpu_monitor.get_current_stats()
@@ -263,12 +257,12 @@ class ParameterOptimizer:
                 'gpu_stats': gpu_stats  # 添加GPU统计信息
             }
             
-            self.results.append(result)
-            
             # 打印GPU利用率信息
             if gpu_stats:
                 print(f"GPU利用率: 平均{gpu_stats['avg_gpu_usage']:.1f}%, 最大{gpu_stats['max_gpu_usage']:.1f}%")
                 print(f"GPU显存: 平均{gpu_stats['avg_gpu_memory']:.1f}%, 最大{gpu_stats['max_gpu_memory']:.1f}%")
+            
+            self.results.append(result)
             
             if converged and frames_used < self.best_frames:
                 self.best_frames = frames_used
@@ -284,11 +278,8 @@ class ParameterOptimizer:
             return result
             
         except Exception as e:
-            if self.gpu_monitor:
-                self.gpu_monitor.stop_monitoring()
+            self.gpu_monitor.stop_monitoring()
             print(f"❌ 配置测试失败: {e}")
-            import traceback
-            traceback.print_exc()
             return {
                 'config_name': config_name,
                 'params': params,

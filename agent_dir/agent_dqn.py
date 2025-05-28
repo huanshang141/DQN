@@ -16,16 +16,15 @@ class QNetwork(nn.Module):
         super(QNetwork, self).__init__()
         self.num_layers = num_layers
         
-        # 构建多层网络 - 修复BatchNorm问题
+        # 构建多层网络
         layers = []
         current_size = input_size
         
         for i in range(num_layers):
             layers.append(nn.Linear(current_size, hidden_size))
             layers.append(nn.ReLU())
-            # 使用LayerNorm替代BatchNorm，避免小批次问题
-            layers.append(nn.LayerNorm(hidden_size))
-            layers.append(nn.Dropout(0.1))
+            layers.append(nn.BatchNorm1d(hidden_size))  # 添加批归一化
+            layers.append(nn.Dropout(0.1))  # 添加dropout
             current_size = hidden_size
         
         # 输出层
@@ -73,16 +72,13 @@ class AgentDQN(Agent):
         self.epsilon = 1.0
         self.epsilon_min = 0.05
         self.epsilon_decay = getattr(args, 'epsilon_decay', 0.9995)
-        self.batch_size = getattr(args, 'batch_size', 64)  # 确保最小批次大小
-        self.memory_size = getattr(args, 'memory_size', 100000)
+        self.batch_size = getattr(args, 'batch_size', 512)  # 增加默认批次大小
+        self.memory_size = getattr(args, 'memory_size', 100000)  # 增加内存大小
         self.update_target_freq = getattr(args, 'update_target_freq', 500)
         self.hidden_size = args.hidden_size
         self.n_frames = args.n_frames
-        self.train_freq = getattr(args, 'train_freq', 1)
-        self.num_layers = getattr(args, 'num_layers', 3)
-        
-        # 确保批次大小至少为2，避免BatchNorm问题
-        self.batch_size = max(self.batch_size, 2)
+        self.train_freq = getattr(args, 'train_freq', 1)  # 训练频率
+        self.num_layers = getattr(args, 'num_layers', 3)  # 网络层数
         
         # 学习率衰减参数 - 从命令行参数获取
         self.lr_decay = args.lr_decay
@@ -182,10 +178,6 @@ class AgentDQN(Agent):
         # 使用更大的批次进行训练以提高GPU利用率
         effective_batch_size = min(self.batch_size, len(self.memory))
         
-        # 确保批次大小至少为2
-        if effective_batch_size < 2:
-            return
-        
         # 从经验回放中采样
         batch = self.memory.sample(effective_batch_size)
         
@@ -204,17 +196,19 @@ class AgentDQN(Agent):
             next_states[i] = torch.from_numpy(np.array(next_state))
             dones[i] = done
         
-        # 计算当前Q值
-        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
-        
-        # Double DQN: 使用主网络选择动作，目标网络评估Q值
-        with torch.no_grad():
-            next_actions = self.q_network(next_states).max(1)[1].unsqueeze(1)
-            next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
-            target_q_values = rewards + (self.gamma * next_q_values * ~dones)
-        
-        # 计算损失
-        loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
+        # 使用混合精度训练（如果支持）
+        with torch.cuda.amp.autocast(enabled=self.device.type=='cuda'):
+            # 计算当前Q值
+            current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
+            
+            # Double DQN: 使用主网络选择动作，目标网络评估Q值
+            with torch.no_grad():
+                next_actions = self.q_network(next_states).max(1)[1].unsqueeze(1)
+                next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                target_q_values = rewards + (self.gamma * next_q_values * ~dones)
+            
+            # 计算损失
+            loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
         
         # 优化
         self.optimizer.zero_grad()
@@ -260,14 +254,8 @@ class AgentDQN(Agent):
         if not test and random.random() < self.epsilon:
             return random.randrange(self.action_size)
         
-        # 确保输入是正确的形状
-        if isinstance(observation, np.ndarray):
-            state = torch.FloatTensor(observation).unsqueeze(0).to(self.device)
-        else:
-            state = torch.FloatTensor([observation]).unsqueeze(0).to(self.device)
-        
-        with torch.no_grad():
-            q_values = self.q_network(state)
+        state = torch.FloatTensor(observation).unsqueeze(0).to(self.device)
+        q_values = self.q_network(state)
         return q_values.max(1)[1].item()
 
     def plot_rewards(self, save_path='plots/reward_curve.png'):
