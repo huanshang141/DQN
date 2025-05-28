@@ -25,13 +25,6 @@ def dqn_arguments(parser):
     parser.add_argument("--convergence_window", default=30, type=int, help='window size for convergence check')
     parser.add_argument("--convergence_threshold", default=195, type=float, help='reward threshold for convergence')
     parser.add_argument("--convergence_check_interval", default=20, type=int, help='interval for convergence check')
-    
-    # DQN训练相关参数
-    parser.add_argument("--batch_size", default=64, type=int, help='batch size for training')
-    parser.add_argument("--memory_size", default=50000, type=int, help='replay buffer size')
-    parser.add_argument("--update_target_freq", default=500, type=int, help='target network update frequency')
-    parser.add_argument("--train_freq", default=2, type=int, help='training frequency')
-    parser.add_argument("--epsilon_decay", default=0.9995, type=float, help='epsilon decay rate')
 
     parser.add_argument("--test", default=False, type=bool)
     parser.add_argument("--use_cuda", default=True, type=bool)
